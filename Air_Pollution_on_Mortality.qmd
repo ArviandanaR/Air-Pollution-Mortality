@@ -1,0 +1,366 @@
+---
+title: "Air Pollution Mortality Analysis"
+format: gfm
+editor: visual
+---
+
+# Import Required Libraries
+
+```{r}
+#| warning: false
+library(tidyverse)
+library(skimr)
+library(reshape)
+library(hrbrthemes)
+library(car)
+library(lmtest)
+library(MASS)
+
+library(PulmoDataSets)
+```
+
+# Import Data
+
+This data contains information from an early study exploring the relationship between air pollution and mortality across 5 Standard Metropolitan Statistical Areas in the U.S. between 1959 and 1961.
+
+Check <https://lightbluetitan.github.io/pulmodatasets/index.html> for more information.
+
+```{r}
+data("air_polution_mortality_df")
+df <- air_polution_mortality_df
+df
+```
+
+# Exploratory Data Analysis
+
+I assume that *City* won't be necessary and dropped in this stage since it is a unique and a categorical/factor variable. However, as each city has its non-unique states, it will still be considered later.
+
+## Quick Summary
+
+```{r}
+df_num <- df[,-1]
+
+skim(df_num)
+```
+
+## Histogram
+
+```{r}
+par(mfrow = c(2,3))
+
+for (col in colnames(df_num)){
+  hist(df_num[[col]], freq = F, breaks = 13, xlab = col, main = paste('Dist of', col), col = 'lightblue')
+  lines(density(df_num[[col]]), col = 'blue', lwd = 2)
+}
+```
+
+Each variable's, except for *NOX*, distribution seems quite reasonable and satisfies the assumption of a regression that *There must be sufficient variation in the values of X variables*. Although *SO2* appears to be heavily skewed, its values still vary between 50-250. NOX, on the other hand, are lies almost entirely between 0 and 50, with only few points outside of this range.
+
+I suppose that *NOX* won't give significant effect in the model. But we'll see.
+
+## Scatter Plot
+
+```{r}
+pairs(df_num,
+      col = 'blue',
+      gap = 0,
+      )
+```
+
+It is apparent that the effect of *NOX* on *Mort* appears to be completely random – might still be slightly correlated though.
+
+This graph gives me a suspicion of nonlinear link between *SO2* and *City*. I will perform a certain transformation on the variable to reveal this nonlinear relationship.
+
+## Correlation Heatmap
+
+```{r}
+#| warning: false
+corr <- melt(cor(df_num, method = "pearson"), as.is = TRUE)
+
+ggplot(corr, aes(x = X1, y = X2, fill = value)) + 
+  geom_tile() + 
+  scale_fill_distiller(palette = 'RdBu', limit = c(-1,1)) + 
+  geom_text(aes(label = round(value, 2)), col = 'black', size = 4) + 
+  labs(title = 'Variables Correlation', x = '', y = '')
+```
+
+As I assumed previously, *NOX* is barely correlated with *Mort*, with only -0.08 of correlation coefficient. I also thought of a nonlinear correlation between *SO2* and *Mort*. To capture their connection more accurately, I am considering on using Spearman method to assess it.
+
+```{r}
+cor(df_num$SO2, df_num$Mort, method = 'spearman')
+```
+
+Apparently, It doesn't remarkably differ with the Pearson method, yet still give a moderate correlation coefficient.
+
+# Modeling
+
+Since the data only contains numeric variables and the dependent variable is a continuous variable, this will be an easy regression analysis. The analysis will be conducted using backward elimination method. I will rely on the statistical test, such as t-test, to eliminate insignificant variables. However, in the later section, I will also consider to retain insignificant variable based on prior evidence and/or domain knowledge.
+
+## First Model
+
+```{r}
+model1 <- lm(Mort ~ ., data = df_num)
+summary(model1)
+```
+
+A pretty decent starting model, with the R-squared value of 0.6392. Next, I will transform *SO2* with *log* transformation to reveal the nonlinear effect.
+
+## Second Model
+
+```{r}
+model2 <- lm(Mort ~ Precip + Educ + NonWhite + NOX + log(SO2), data = df_num)
+summary(model2)
+```
+
+It can be seen that *log SO2* results in a higher coefficient and higher Adjusted R-squared of the model. From this point onward, I will use *log SO2* in the model.
+
+## Third Model
+
+To give a better perspective on how each variable influences the dependent variable, I transform the variables to a standardised form. Standardisation on regression is basically the same as regular regression with a transformation of *k = 1/var(X)*. Hence, by its statistical properties, the R-squared remain the same as the regular form, but with a better interpretation of the *beta* coefficient.
+
+```{r}
+df_num$log_SO2 <- log(df_num$SO2)
+df_scaled2 <- as.data.frame(scale(df_num))
+df_scaled2 <- subset(df_scaled2, select = -c(SO2))
+
+model_scaled<- lm(Mort ~ Precip + Educ + NonWhite + NOX + log_SO2, data = df_scaled2)
+summary(model_scaled)
+```
+
+As we can see, the Adjusted R-squared remain consistent while the *beta* coefficient is transformed. Here, the model shows that *NOX* has a small influence on *Mort* by less than 0.1 of. *beta* coefficient. Therefore, I drop the variable to look for a better fit.
+
+```{r}
+model3 <- lm(Mort ~ Precip + Educ + NonWhite + log_SO2, data = df_scaled2)
+summary(model3)
+```
+
+Dropping *NOX* apparently leads to a better fit of the model – shown by bigger Adjusted R-Squared.
+
+```{r}
+model_unscaled <- lm(Mort ~ Precip + Educ + NonWhite + log(SO2), data = df_num)
+summary(model_unscaled)
+```
+
+Moreover, All of the variables satisfy the significance requirement (*beta ≠ 0*), as reflected by p-values \< 0.05.
+
+# Dummy Modeling
+
+An Adjusted R-Squared of 0.6605 is quite acceptable, but I think it could be improved.
+
+In the previous stage, I didn't consider *City* as an explanatory variable as it is a unique factor. However, some cities shared same States that could be regarded as a covariate.
+
+```{r}
+df$Location <- sub(".*,\\s*", "", df$City)
+df2 <- subset(df, select = -c(City))
+df2
+```
+
+## Quick EDA
+
+Do different states mean different Mortality Rate?
+
+```{r}
+df$Location <- sub(".*,\\s*", "", df$City)
+df2 <- subset(df, select = -c(City))
+
+grouped = df2 %>% group_by(Location) %>% 
+  summarise(Avg = mean(Mort), Var = var(Mort))
+
+ggplot(df2, aes(x = Location, y = Mort)) + 
+  geom_boxplot() + geom_jitter(position = 'identity')
+```
+
+To ensure that the differences are real, let's use a statistical test. Although ANOVA is the standard method to evaluate the presence of differences, it assumes the same variance between group, which is not satisfied in this data (some group contain only 1 observation, resulting in NA variance). Thus, I will perform Kruskal-Wallis test as an alternative to ANOVA.
+
+```{r}
+kruskal.test(Mort ~ Location, data = df2)
+```
+
+The result shows that there is at least one group that differ from the other. Hence, *Location* might have a significant effect towards *Mort.*
+
+We still have to be aware whether *Location* also affect, or at least correlated, other explanatory variables or not. I will reveal its effect towards the others later in the multicollinearity test.
+
+## First Model
+
+I will continue to use the standardised model to provide a better insight into the true effect of the predictors on the dependent variable. I will also modify the reference category of the categorical variable, using the category with the highest *Mort* as the reference, to see which states truly differ from it
+
+```{r}
+df_scaled2 <- cbind(df_scaled2, df2$Location)
+colnames(df_scaled2)[7] <- 'Location'
+
+df_scaled2$Location <- df_scaled2$Location %>% 
+  factor() %>% 
+  relevel(ref = 'LA')
+```
+
+Move on to the first model with dummy variable. Since the third model in the latest stage has been proven to be the best model – all variables are statistically significant and generates quiet high Adjusted R-squared – I will start the first dummy model with the corresponding regressors.
+
+```{r}
+dummy1 <- lm(Mort ~ Precip + Educ + NonWhite + log_SO2 + Location, data = df_scaled2)
+summary(dummy1)
+```
+
+## Second Model
+
+The previous model is generally good, since it improved the Adjusted R-squared from 0.6605 to 0.7354. However, it might still be improved as the model contains many insignificant variables.
+
+In the second model, I drop *Educ* as it only affect *Mort* by 0.08 of *Mort* standard deviation. I also don't think that Education directly influence a city's mortality rate. (Might be a bit biased on this :D)
+
+```{r}
+dummy2 <- lm(Mort ~ Precip + NonWhite + log_SO2 + Location, data = df_scaled2)
+summary(dummy2)
+```
+
+Although the Adjusted R-squared increased, it only rose by barely 0.07
+
+## Third Model
+
+```{r}
+dummy3 <- lm(Mort ~ NonWhite + log_SO2 + Location, data = df_scaled2)
+summary(dummy3)
+```
+
+Lastly, I dropped *Precip* since it is also statistically insignificant towards the model. By dropping it, the model generates slightly higher Adjusted R-squared.
+
+I think this model is already a good fit, even though some of the dummies are still statistically insignificant.
+
+# Final Model
+
+As I stated in the **Modeling** Section, I won't solely rely on the statistical properties but some domain knowledge as well. I might also consider existing evidences and combine it with the statistical properties.
+
+In this case, I still want to include *Precip* into the model because some researches have said that precipitation, and heavy rain, do associates with mortality risk and poses health risks.
+
+On the other side, *Educ* could have been a reasonable variable to be included as well. Several studies have shown a connection between mortality and education, concluding that education is one of the key factor in reducing mortality risk. However, this conclusion isn't well-reflected in this analysis. In the first dummy model *dummy1*, *Educ* has a positive link with *Mort*, implying that higher median years of education are linked to a higher mortality rate, which is the opposite of the findings from previous research. Therefore, I will not include *Educ* into the final model
+
+Thus, the second dummy model *dummy2* would be the final model and will be tested whether it satisfies the classic linear regression assumptions. The model below is the unscaled model, which will be testes afterwards.
+
+```{r}
+df2$Location <- df2$Location %>% 
+  factor() %>% 
+  relevel(ref = 'LA')
+
+dummy_unscaled <- lm(Mort ~ Precip + NonWhite + log(SO2) + Location, data = df2)
+summary(dummy_unscaled)
+```
+
+# Assumptions
+
+## Linearity
+
+As the name suggests, Linear Regression is a formula that expresses the conditional expectation of *Y* as a linear function of *X*. However, the term "linear" here refers to linearity in the parameters, which allows the transformation of *X* variables using any of nonlinear function, such as *log(SO2)* in the prior stages.
+
+This model certainly pass this assumption.
+
+## Exogeneity
+
+This assumption states that *Covariance, or Correlation, between independent variables and errors should be zero*.
+
+```{r}
+X_resid <- data.frame(Residual = dummy_unscaled$resid, Precip = df2$Precip, NonWhite = df2$NonWhite, log_SO2 = log(df2$SO2))
+
+cor(X_resid)
+```
+
+Though a simple correlation coefficient test doesn't guarantee their independence, a low correlation coefficient might indicates that they would satisfy the assumption.
+
+## Zero Mean
+
+The errors should be averaged at 0 for any given X. The plot below shows that given *Precip, NonWhite,* and *log(SO2)* the residuals are centered around 0. Thus, it satisfy this assumption.
+
+```{r}
+pairs(X_resid)
+```
+
+## Homoscedastic
+
+The variance of the errors should also be constant for any given X. This assumption can be evaluated by plotting the fitted values against the residuals or by using statistical test such as Breusch-Pagan test.
+
+```{r}
+fit_resid = data.frame(
+  fit = dummy_unscaled$fitted.values,
+  resid = dummy_unscaled$residuals
+)
+
+ggplot(fit_resid, aes(x = fit, y = resid)) + 
+  geom_point(color = 'blue')+
+  geom_smooth(method = 'lm', formula = 'y ~ x', color = 'red') +
+  labs(x = 'Fitted Values', y = 'Residuals', title = 'Homoscedastic Test') +
+  geom_hline(yintercept = 0, linetype = 'dashed', color = 'black', alpha = 0.5)
+```
+
+```{r}
+bptest(dummy_unscaled)
+```
+
+With a null hypothesis of "the residuals are homoscedastic" and the Breusch-Pagan test obtained a p-value of 0.8612, We do not reject the null hypothesis. Therefore, the model doesn't violate the homoscedasticity assumption.
+
+## Autocorrelation
+
+The correlation between two *X* values X~i~ and X~j~ (i ≠ j) should be zero.
+
+```{r}
+dwtest(dummy_unscaled)
+```
+
+The Durbin-Watson test is one of the most commonly used test for detecting autocorrelation. The results indicate that there is no autocorrelation in this model.
+
+## Number of Observations Greater than Parameters
+
+This assumption is necessary because if the number of observations *n* is less than the number of parameters *p*, the model becomes mathematically under determined. In this case, *X^T^ X* is singular, leading to non-unique solutions, perfect overfitting, and undefined statistical tests such as standard errors, t-values, and p-values.
+
+```{r}
+nrow(df2) > length(dummy_unscaled$coefficients)
+```
+
+## Sufficient Variation
+
+The *X* values in a given sample must not all be the same. In the EDA section I have provided graphs that show the variability in *X*'s values, which in the final model *X* is *Precip, NonWhite,* and *SO2*. Therefore, this assumption is met by this model.
+
+This assumption would be violated if *NOX* were included since it doesn't have sufficient variation in its value.
+
+## Multicollinearity
+
+The presence of multicollinearity might affect the stability and the precision of the estimation.
+
+```{r}
+vif(dummy_unscaled)
+```
+
+The rule of thumb for interpreting VIF (Adjusted GVIF in this case) is that if the value is less than the threshold of 10, it can be concluded that there is no multicollinearity. Hence, this model meets the assumption of no multicollinearity.
+
+Note: There might be a difference when the covariates are all numeric (use VIF) or combination of numeric and categorical (use GVIF^1/(2\*df)^ /Adjusted GVIF)
+
+## Correctly Specified
+
+One of the assumption of linear regression is that there is no specification bias. RESET test is a common test to evaluate whether the model is correctly specified. RESET test present a null hypothesis of model is not misspecified.
+
+```{r}
+resettest(dummy_unscaled)
+```
+
+The result indicates that the null hypothesis is not rejected, thus the model is correctly specified.
+
+Nevertheless, this assumption should not be decided only on the test, but on good economic sense or domain knowledge as well. For example, the Educ variable was dropped from the final model because of its misleading estimation effect, which was identified based on domain knowledge.
+
+In the final model, all variables clearly make logical sense. Therefore, this assumption is satisfied.
+
+## Normally Distributed Error
+
+Lastly, it is assumed that the errors in a linear regression model are normally distributed. However, this assumption is crucial for statistical inference, not for estimating/fitting the model as I have done here. Furthermore, since this dataset contains an adequate number of observations (60), this assumption could be justified by the Central Limit Theorem (CLT).
+
+```{r}
+hist(dummy_unscaled$residuals, freq = F, col = 'lightblue', breaks = 13)
+lines(density(dummy_unscaled$residuals), col = 'blue', lwd = 2)
+```
+
+```{r}
+shapiro.test(dummy_unscaled$residuals)
+```
+
+The results from the Shapiro–Wilk test indicate that the errors do not follow a normal distribution. Nonetheless, as stated earlier, this assumption is not critical for the purpose of model fitting in this case and the model still valid because of the sufficient number of observations.
+
+# Is It a Good Fit?
+
+In conclusion, the final mode *dummy model* is generally a good fit because it satisfies all the assumptions. It also generates an R-squared of 0.7421, which is high enough to be considered a good representation. Furthermore, I think that all the included variables, though not all are statistically significant, have an impact on *Mort*. We might conclude that *Precip, NonWhite,* and *SO2* are causally related to the mortality rate, as this aligns with logical reasoning. However, to fully establish their causal effect on *Mort*, a more specific research design and advanced domain knowledge would be required.
+
+I think that's all for this analysis. I remain open to any critiques or recommendations regarding my analysis, as well as discussions about better approaches, updated models, and broader insights on how to integrate statistical conclusions with domain knowledge. Thank You!
